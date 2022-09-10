@@ -1,0 +1,296 @@
+with
+fa as (
+    select
+        comp_id, 
+        max(accountant) accountant
+    from `vexere-218206.landing_zone.bus_commission_fa_doc`
+    group by 1
+    ),
+seat_template as (
+    select
+        base_id, date trip_date, time,
+        max(split(seat_template_info,'|')[safe_offset(5)])  seat_template_name
+    from `dwh.trip`
+    group by 1,2,3
+    ),
+booking as (
+    select
+        -- key
+        t.code ticket_code,
+        t.booking_code,
+        ifnull(t.fare,0) fare,
+        case
+            when t.status = 1 and (expired_time >= current_datetime('Asia/Ho_Chi_Minh') or expired_time < '2010-01-01' or expired_time is null) then 'booked'
+            when t.status = 3 then 'cancelled'
+            when t.status = 1 and expired_time <= current_datetime('Asia/Ho_Chi_Minh') and expired_time >= '2010-01-01' then 'cancelled'
+            when t.status in (2,4,5,8) then 'paid'
+            else 'cancelled'
+        end as status_name,
+        case left(t.vexere_payment_info,1)
+            when '1' then 'Bus Operator'
+            when '2' then 'Cash Transfer'
+            when '3' then 'COD'
+            when '4' then 'Driver'
+            when '5' then 'Online'
+            when '6' then 'Agent'
+            when '7' then 'Cash'
+            when '8' then 'Partner'
+            when '9' then 'Momo'
+        end payment_type,
+        date(t.trip_date) trip_date,
+        format_datetime('%R',t.trip_date) as trip_time,
+
+        -- customer info
+        max(t.customer_name) customer_name,
+        max(t.customer_phone) customer_phone,
+
+        -- ticket info
+        max(date(t.created_date)) created_date,
+        max(t.created_user) created_user,
+        max(t.canceled_date) canceled_date,
+        count(t.id) as quantity,
+        string_agg(t.seat_code, '  ') as seat_info,
+        max(case
+            when t.ticket_source in (200,210,220,230) then 'FE'
+            when t.ticket_source = 110 then 'Widget NX'
+            when t.ticket_source = 310 then 'AMS'
+            when t.ticket_source = 320 then 'API'
+            when t.ticket_source = 330 then 'WL'
+            when t.ticket_source = 340 then 'Affiliate Widget'
+            when t.ticket_source = 350 then 'Affiliate Landing Page'
+            when t.ticket_source = 360 then 'Affiliate Banner'
+            when t.ticket_source = 370 then 'Agent BMS'
+            when t.ticket_source = 380 then 'Agent App'
+            when t.ticket_source in (410,420) then 'VXRAPP'
+            when t.ticket_source = 500 then 'CE'
+            when t.ticket_source = 700 then 'WEBNX'
+            when t.ticket_source = 800 then 'APPNX'
+            when t.ticket_source = 900 then 'Affiliate Banner'
+        end) ticket_source,
+        max(case
+            when t.ticket_source in (100) then 'BMS'
+            when t.ticket_source in (110) then 'Widget NX'
+            when t.ticket_source in (200) then 'Web Desktop'
+            when t.ticket_source in (210) then 'Web Desktop'
+            when t.ticket_source in (220) then 'Web Mobile'
+            when t.ticket_source in (230) then 'Web Blog'
+            when t.ticket_source in (300) then 'Agent'
+            when t.ticket_source in (310) then 'Agent AMS'
+            when t.ticket_source in (320) then 'Agent API'
+            when t.ticket_source in (330) then 'Agent Whitelabel'
+            when t.ticket_source in (340) then 'Affiliate Widget'
+            when t.ticket_source in (350) then 'Affiliate Landing Page'
+            when t.ticket_source in (360) then 'Affiliate Banner'
+            when t.ticket_source in (370) then 'Agent BMS'
+            when t.ticket_source in (380) then 'Agent App'
+            when t.ticket_source in (400) then 'App'
+            when t.ticket_source in (410) then 'App iOS'
+            when t.ticket_source in (420) then 'App Android'
+            when t.ticket_source in (500) then 'CE'
+            when t.ticket_source in (600) then 'Driver'
+            when t.ticket_source in (700) then 'WebNX'
+            when t.ticket_source in (800) then 'AppNX'
+            when t.ticket_source in (900) then 'Goyolo'
+            end) ticket_source_name,
+        max(case
+            when t.ticket_source in (100,600) then 'BMS'
+            when t.ticket_source in (200,210,220,230,340,350,360,110) then 'Web'
+            when t.ticket_source in (300,310,320,330,370,380) then 'Agent'
+            when t.ticket_source in (400,410,420) then 'App'
+            when t.ticket_source in (500) then 'CE'
+            -- when t.ticket_source in (110) then 'Widget'
+            when t.ticket_source in (700,800) then 'Web/App NX'
+            when t.ticket_source in (900) then 'Goyolo'
+            end) ticket_source_group,
+        max(t.note) note,
+        max(t.vexere_note) vexere_note,
+        max(case t.is_deposit
+            when 0 then 'No'
+            when 1 then 'Yes'
+        end) is_deposit_ticket,
+
+        -- routes
+        max(l1.district || ', ' || l1.state) as from_name,
+        max(l2.district || ', ' || l2.state) as to_name,
+        max(coalesce(tr.name, concat(l1.state, ' - ', l2.state))) as trip_name,
+
+        -- bus operators
+        max(c.name) as bus_operator,
+        max(p.full_name) am,
+
+        -- merchants
+        max(if(t.affiliate_id !=0, a2.name, a.name)) agency,
+
+        -- ticket fare
+        sum(ifnull(t.fare,0) + ifnull(t.surcharge,0) + ifnull(t.eating_fare,0)) total_fare, -- total fare
+        sum(ifnull(t.pick_up_surcharge,0) + ifnull(t.transfer_surcharge,0) + ifnull(t.arrive_transfer_surcharge,0) + ifnull(t.drop_off_surcharge,0)) pickup_transfer_surcharge,
+        sum(ifnull(t.discount,0)) as bus_operator_discount,
+        sum(ifnull(t.vxr_discount_value,0)) vexere_discount,
+        max(t.discount_reason_info) discount_reason_info,
+        max(t.vxr_discount_reason_info) discount_reason_info_2,
+        sum(ifnull(t.commission,0)) vxr_commission,
+        sum(ifnull(if(t.trip_date < '2022-04-01', t.commission,tc.commission_v2),0)) vxr_commission_v2,
+        max(if(tc.commission_v2 > 0, tc.commission_rate_name, null)) commission_rate_name,
+        max(tc.bus_commission_config_name) bus_commission_config_name,
+        sum(ifnull(t.secondary_commission,0)) agent_commission,
+        sum(ifnull(t.cancel_fee,0)) cancel_fee,
+        sum(ifnull(t.refund,0)) as refund,
+        
+        -- payment methods
+        max(case t.online_payment_source
+            when 1 then 'VXR'
+            when 2 then 'C1B'
+            when 3 then 'FUTA'
+            when 4 then 'THUANTHAO'
+            when 5 then 'CHINNGHIA'
+            when 6 then 'HOANGLONG'
+            when 7 then 'C1Bv2'
+            when 8 then 'MEKONG'
+        end) payment_source,
+        max(t.user_charge) user_charge,
+        max(t.charge_date) charge_date,
+        max(case left(t.vexere_payment_info,1)
+            when '5' then split(t.vexere_payment_info, ':')[ordinal(3)]
+            when '2' then
+                case
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'AGRIBANK' then 'ARGI'
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'SACOMBANK' then 'SACB'
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'DONGABANK' then 'DNA'
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'VIETINBANK' then 'CTG'
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'TECHCOMBANK' then 'TECH'
+                    when split(t.vexere_payment_info, ':')[ordinal(2)] = 'VIETCOMBANK' then 'VCOM'
+                    else split(t.vexere_payment_info, ':')[ordinal(2)]
+                end
+            else ''
+        end) bank_code,
+        max(case t.online_payment_source
+            when 2 then 'VISA/MASTERCARD'
+            when 1 then 'Internet Banking'
+            when 11 then 'ZALOPAY'
+            when 16 then 'MOMO'
+            when 15 then 'ONEPAY'
+            when 17 then 'AIRPAY'
+            when 14 then 'VNPAY'
+            when 19 then 'MOCA'
+        end) online_payment_source,
+        max(t.partner_code) partner_code,
+        max(t.user_source) user_source,
+        max(t.source) source,
+        max(st.seat_template_name) seat_template_name,
+        max(split(pickup_info,'|')[safe_ordinal(1)]) pickup_name,
+
+        max(accountant) accountant,
+        max(ch.customer_type) customer_type
+
+    from `dwh.booking`  b
+    join `dwh.ticket_vxr` t on b.code = t.booking_code
+    left join `dwh.trip` tr on t.trip_id = tr.id
+    left join `dwh.location` l1 on t.from_id = l1.id
+    left join `dwh.location` l2 on t.to_id = l2.id
+    left join `dwh.company` c on t.comp_id = c.id
+    left join `dwh.person` p on c.curator = p.id
+    left join `dwh.company` a on t.agent_id = a.id
+    left join `dwh.affiliate` aff on t.affiliate_id = aff.id
+    left join `dwh.company` a2 on aff.agent_id = a2.id
+    left join `bi.customer_history` ch on t.customer_phone = ch.customer_phone and date(t.created_date) = ch.created_date
+    left join seat_template st on t.trip_id = st.base_id and date(t.trip_date) = st.trip_date and format_datetime('%H:%M', t.trip_date) = st.time
+    left join `bi.ticket_commission_v2` tc on t.id = tc.id
+    left join fa on t.comp_id = fa.comp_id
+    where t.created_date >= '2019-01-01'
+    group by 1,2,3,4,5,6,7
+),
+booking_with_num as (
+    select 
+        *,
+        row_number() over (partition by booking_code) row_num
+    from booking
+),
+coupon as (
+    select 
+        t.booking_code,
+        max(b.coupon_code) coupon_code,
+        max(cp.campaign_name) campaign_name,
+        ifnull(if(
+            max(ifnull(cp.max_discount_value,999999999)) >=
+                (case 
+                    when max(cp.unit) = 1 then max(cp.coupon_value)
+                    when max(cp.unit) = 2 then max(cp.coupon_value)*(sum(t.fare-ifnull(t.discount,0))/100) 
+                end),
+            (case 
+                when max(cp.unit) = 1 then max(cp.coupon_value)
+                when max(cp.unit) = 2 then max(cp.coupon_value)*(sum(t.fare-ifnull(t.discount,0))/100) 
+            end),
+            max(cp.max_discount_value)
+        ),0) coupon_value,
+        max(cp.sponsor_info) sponsor_info,
+        
+
+    from `dwh.ticket_vxr` t
+    left join `dwh.booking` b on t.booking_code = b.code
+    left join `dwh.coupon` coupon on b.coupon_id = coupon.id
+    left join `dwh.campaign` cp on coupon.campaign_id = cp.id --and (cp.expire_date >= t.created_date or cp.expire_date is null)
+    where t.created_date >= '2019-01-01'
+    group by 1
+),
+top_up as (
+    select
+        *,
+        row_number() over (partition by booking_code order by created_at) as time
+    from `vexere-218206.dwh.transaction_top_up`
+)
+
+select
+    bwn.* except(row_num),
+
+    -- coupon
+    cp.coupon_code, cp.campaign_name, cp.coupon_value,
+    coupon_value*if(sponsor_info !='', ifnull(safe_cast(regexp_extract(sponsor_info, r'"vexere_ratio":(\d{0,3})') as int),0), 100)/100 vxr_sponsorship,
+    coupon_value*ifnull(safe_cast(regexp_extract(sponsor_info, r'"bus_operator_ratio":(\d{0,3})') as int),0)/100 bus_sponsorship,
+    coupon_value*ifnull(safe_cast(regexp_extract(sponsor_info, r'"partner_ratio":(\d{0,3})') as int),0)/100 partner_sponsorship,
+    -- top up
+    t1.amount as ts1_transaction_value,
+    case t1.method
+        when 1 then 'At Bus Operator'
+        when 2 then 'Cash Transfer'
+        when 3 then 'COD'
+        when 4 then 'Driver'
+        when 5 then 'Online'
+        when 6 then 'Agent'
+        when 7 then 'At VEXERE'
+        when 8 then 'Convenient Store'
+    end as ts1_payment_method,
+    t1.created_at as ts1_charge_date,
+    t1.gateway_transaction_detail as ts1_gateway_transaction_detail,
+    t2.amount as ts2_transaction_value,
+    case t2.method
+        when 1 then 'At Bus Operator'
+        when 2 then 'Cash Transfer'
+        when 3 then 'COD'
+        when 4 then 'Driver'
+        when 5 then 'Online'
+        when 6 then 'Agent'
+        when 7 then 'At VEXERE'
+        when 8 then 'Convenient Store'
+    end as ts2_payment_method,
+    t2.created_at as ts2_charge_date,
+    t2.gateway_transaction_detail as ts2_gateway_transaction_detail,
+    t3.amount as ts3_transaction_value,
+    case t3.method
+        when 1 then 'At Bus Operator'
+        when 2 then 'Cash Transfer'
+        when 3 then 'COD'
+        when 4 then 'Driver'
+        when 5 then 'Online'
+        when 6 then 'Agent'
+        when 7 then 'At VEXERE'
+        when 8 then 'Convenient Store'
+    end as ts3_payment_method,
+    t3.created_at as ts3_charge_date,
+    t3.gateway_transaction_detail as ts3_gateway_transaction_detail,
+    coalesce(t2.amount,0)+coalesce(t3.amount,0)+coalesce(t1.amount,0) as total_transaction_value,
+
+from booking_with_num bwn
+left join coupon cp on bwn.booking_code = cp.booking_code and bwn.row_num = 1
+left join top_up t1 on bwn.booking_code = t1.booking_code and t1.time = 1 and bwn.row_num = 1
+left join top_up t2 on bwn.booking_code = t2.booking_code and t2.time = 2 and bwn.row_num = 1
+left join top_up t3 on bwn.booking_code = t3.booking_code and t3.time = 3 and bwn.row_num = 1
