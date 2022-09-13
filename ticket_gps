@@ -1,0 +1,91 @@
+with 
+tracking as (
+    -- Lọc ra event gps từ data tracking và sửa data gps_status cho đồng nhất giữa web và app 
+    select 
+        e.event_time,
+        e.booking_code,
+        case 
+            when trim(gps_status) = 'Currently we are unable to access the location of this bus, please comeback later' then 'Data Not Found'
+            when trim(gps_status) = 'Bks Not Found' then 'Data Not Found'
+            when trim(gps_status) = 'timeout of 60000ms exceeded' then 'Data Not Found'
+            when trim(gps_status) = 'Time not verified' and event_time <= ticket_trip_date then 'View location 1 hour before departure'
+            when trim(gps_status) = 'Time not verified' and event_time > ticket_trip_date then 'The bus has arrived'
+            when trim(gps_status) = 'Time not verified' and ticket_trip_date is null then 'View location 1 hour before departure'
+            when trim(gps_status) = 'You can only view bus location 1 hour before departure time, please comeback later!' then 'View location 1 hour before departure'
+            else trim(gps_status)
+        end gps_status2
+
+    from ${ref("tracking","event")} e
+    left join ${ref("tracking","ticket_status")} ts on e.booking_code = ts.booking_code 
+    where
+        event_time >='2021-05-24'
+        -- Data của web đúng từ tháng 4, app từ cuối tháng 5
+        and event_step = 'gps/view_load'
+),
+view_gps as (
+    -- Xác định booking có xem gps thành công hay không, trang thái đầu tiên/cuối cùng user thấy là gì 
+    select
+        booking_code,
+        max(is_success) is_success,
+        max(first_gps_status) first_gps_status,
+        max(last_gps_status) last_gps_status,
+
+        max(first_event_time) first_event_time,
+        max(last_event_time) last_event_time,
+    from (
+        select 
+            booking_code,
+            if(gps_status2 = 'Success', true, null) is_success,
+            first_value(gps_status2) over (partition by booking_code order by event_time asc ) first_gps_status,
+            first_value(gps_status2) over (partition by booking_code order by event_time desc ) last_gps_status,
+
+            first_value(event_time) over (partition by booking_code order by event_time asc ) first_event_time,
+            first_value(event_time) over (partition by booking_code order by event_time desc ) last_event_time,
+        from tracking tk)
+    group by 1
+),
+ticket as (
+    -- Xác định tất cả vé được đặt trên hệ thống VXR
+    select 
+        booking_code,
+        max(ticket_source_name) ticket_source_name,
+        max(ticket_source_group) ticket_source_group,
+        max(t.comp_id) comp_id,
+        max(comp_name) comp_name,
+        max(am_name) am_name,
+        max(route_2way) route_2way,
+        max(from_to) from_to,
+        max(customer_type) customer_type,
+
+        max(t.trip_id) trip_id,
+        max(t.created_date) created_date,
+        max(trip_datetime) trip_datetime,
+        max(case 
+            when sub_type_id in (1,2) then 'Văn phòng'
+            when sub_type_id in (3,4,5,6,7,8,9,10,11) then 'Dọc đường'
+            when lower(a1.name) like '%vp%' then 'Văn phòng'
+            when lower(a1.name) like '%văn phòng%' then 'Văn phòng'
+            when lower(a1.name) like '%bến xe%' then 'Văn phòng'
+            else 'Dọc đường'
+        end) from_area_type,
+
+    from ${ref("bi","ticket_vxr")} t 
+    left join ${ref("dwh","area")} a1 on a1.id = t.from_id
+    where
+        t.created_date >= '2021-05-24'
+        and t.status != 3
+    group by 1
+)
+
+select 
+    t.*,
+    tcg.gps_source,
+    vg.is_success,
+    vg.first_gps_status,
+    vg.last_gps_status,
+    vg.first_event_time,
+    vg.last_event_time, 
+
+from ticket t
+left join ${ref("bi","trip_config_gps")} tcg on t.trip_id = tcg.route_id and t.trip_datetime = tcg.trip_datetime
+left join view_gps vg on t.booking_code = vg.booking_code
